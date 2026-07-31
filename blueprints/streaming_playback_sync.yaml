@@ -1,0 +1,320 @@
+blueprint:
+  name: "Streaming Playback Sync"
+  domain: automation
+  author: npitts5397
+  source_url: https://github.com/npitts5397/ha_custom/blob/main/blueprints/streaming_playback_sync.yaml
+  description: >
+    Gracefully controls a playback device (e.g. a soundbar) in response to a
+    streaming device's playback state. When the streamer starts playing, the
+    playback device can be powered on, set to a default volume, and switched to
+    a specific input. When streaming ends, the playback device can restore a
+    park on an idle input and (optionally) restore the stream volume — a safety
+    reset so another input isn't unexpectedly loud — and power off, but only
+    while the device is still on the configured Stream Input, so it's left alone
+    if switched to another input in the meantime. Pausing starts a guarded
+    auto-off timer that powers the playback device off only if its input hasn't
+    changed.
+
+    Although built for a WiiM Pro feeding a soundbar over optical, nothing here
+    is device-specific — the streamer is used only as a trigger source and all
+    control commands target the playback device. Works with WiiM Sound or any
+    other `media_player` streamer.
+
+    Anti-flap: the automation runs in `mode: restart` and every trigger uses a
+    3s `for:` debounce, so brief state flickers between tracks in the same
+    stream session won't fire spurious power/input changes. Adjust the `for:`
+    values in the triggers if your streamer flickers over a longer gap.
+
+    Change log:
+      #1.0.0 - SMRTH-4 - Initial version.
+      #1.0.1 - SMRTH-4 - Don't re-run on-path when resuming from pause (not_from: paused).
+      #1.0.2 - SMRTH-4 - Add Return Volume applied on stream-end / pause auto-off.
+      #1.0.3 - SMRTH-4 - On stream-end, skip end cleanup if playback input is no longer the Stream Input.
+      #1.0.4 - SMRTH-4 - Rename to Stream/Idle scheme; single Stream Volume + Restore Volume on End toggle.
+
+    Source repository: https://github.com/npitts5397/ha_custom
+  input:
+
+    # ── Section: Devices ───────────────────────────────────────────────────
+    devices:
+      name: Devices
+      icon: mdi:cast-audio
+      input:
+        streaming_device:
+          name: Streaming Device
+          description: >
+            Required. The streamer whose playback state drives this automation
+            (e.g. a WiiM Pro). Used only as a trigger source — no commands are
+            sent to it.
+          selector:
+            entity:
+              domain: media_player
+              multiple: false
+        playback_device:
+          name: Playback Device
+          description: >
+            Optional. The device that is actually controlled — power, volume,
+            and input (e.g. a soundbar). If left unset, the Streaming Device is
+            used for all commands as well.
+          default: {}
+          selector:
+            entity:
+              domain: media_player
+              multiple: false
+
+    # ── Section: Playback Settings ─────────────────────────────────────────
+    playback_settings:
+      name: Playback Settings
+      icon: mdi:tune
+      input:
+        stream_input:
+          name: Stream Input
+          description: >
+            Optional. Source/input to select on the playback device when
+            streaming starts (must match a name in the device's source list,
+            e.g. "Optical"). Leave blank to let the device handle input
+            switching itself.
+          default: ""
+          selector:
+            text:
+        stream_volume:
+          name: Stream Volume
+          description: >
+            Volume (0–100%) applied to the playback device when streaming
+            starts. Also the level restored on end when "Restore Volume on End"
+            is enabled. Set to -1 to leave the volume untouched.
+          default: -1
+          selector:
+            number:
+              min: -1
+              max: 100
+              step: 1
+              unit_of_measurement: "%"
+              mode: box
+        idle_input:
+          name: Idle Input
+          description: >
+            Optional. Source/input to park the playback device on when streaming
+            ends or the pause auto-off fires (e.g. "TV"). Leave blank to leave
+            the input unchanged.
+          default: ""
+          selector:
+            text:
+        restore_volume_on_end:
+          name: Restore Volume on End
+          description: >
+            When enabled, the playback device's volume is set back to Stream
+            Volume when streaming ends or the pause auto-off fires — a safety
+            reset so another input isn't unexpectedly loud. Requires Stream
+            Volume to be set (not -1). Best effort; the device must retain its
+            volume across input changes / power cycles.
+          default: false
+          selector:
+            boolean:
+
+    # ── Section: Power Control ─────────────────────────────────────────────
+    power_control:
+      name: Power Control
+      icon: mdi:power
+      input:
+        power_on_control:
+          name: Power On Control
+          description: Power on the playback device when streaming starts.
+          default: false
+          selector:
+            boolean:
+        power_on_delay:
+          name: Power-On Delay
+          description: >
+            How long to wait after streaming starts before running the power-on
+            sequence. Defaults to 0.
+          default:
+            hours: 0
+            minutes: 0
+            seconds: 0
+          selector:
+            duration:
+        power_off_control:
+          name: Power Off Control
+          description: >
+            Power off the playback device when streaming ends, and when the
+            pause auto-off timer fires.
+          default: false
+          selector:
+            boolean:
+        power_off_delay:
+          name: Power-Off Delay
+          description: >
+            How long to wait after streaming ends before restoring the idle
+            input and powering off. Defaults to 10 seconds.
+          default:
+            hours: 0
+            minutes: 0
+            seconds: 10
+          selector:
+            duration:
+        pause_autooff_delay:
+          name: Pause Auto-Off Delay
+          description: >
+            How long to wait after the streamer is paused before auto-powering
+            off the playback device. The power-off only happens if the streamer
+            is still paused and the playback device's input hasn't changed
+            during the wait. Requires Power Off Control. Defaults to 15 minutes.
+          default:
+            hours: 0
+            minutes: 15
+            seconds: 0
+          selector:
+            duration:
+
+mode: restart
+max_exceeded: silent
+
+variables:
+  streaming_device: !input streaming_device
+  playback_override: !input playback_device
+  # Fall back to the streaming device when no separate playback device is set.
+  playback_device: >-
+    {% set o = playback_override %}
+    {{ o if o is string and o | length > 0 else streaming_device }}
+  stream_input: !input stream_input
+  stream_volume: !input stream_volume
+  idle_input: !input idle_input
+  restore_volume_on_end: !input restore_volume_on_end
+  power_on_control: !input power_on_control
+  power_off_control: !input power_off_control
+  # Small spacing between successive commands so the playback device isn't
+  # flooded (e.g. power-on then input then volume).
+  command_spacing: "00:00:01"
+
+trigger:
+  # Streaming started. `not_from: paused` so resuming from a pause does NOT
+  # re-run the on-path (power/volume/input) — only genuine fresh starts do.
+  - id: stream_start
+    platform: state
+    entity_id: !input streaming_device
+    not_from:
+      - "paused"
+    to: "playing"
+    for: "00:00:03"
+  # Streaming ended (stopped, not paused).
+  - id: stream_end
+    platform: state
+    entity_id: !input streaming_device
+    to:
+      - "idle"
+      - "off"
+      - "standby"
+    for: "00:00:03"
+  # Streaming paused.
+  - id: stream_pause
+    platform: state
+    entity_id: !input streaming_device
+    to: "paused"
+    for: "00:00:03"
+
+condition: []
+
+action:
+  - choose:
+
+      # ── Streaming started ────────────────────────────────────────────────
+      - conditions: "{{ trigger.id == 'stream_start' }}"
+        sequence:
+          - delay: !input power_on_delay
+          # Re-verify the streamer is still playing after the delay.
+          - condition: template
+            value_template: "{{ is_state(streaming_device, 'playing') }}"
+          - if: "{{ power_on_control }}"
+            then:
+              - service: media_player.turn_on
+                target:
+                  entity_id: "{{ playback_device }}"
+              - delay: "{{ command_spacing }}"
+          - if: "{{ stream_input | length > 0 }}"
+            then:
+              - service: media_player.select_source
+                target:
+                  entity_id: "{{ playback_device }}"
+                data:
+                  source: "{{ stream_input }}"
+              - delay: "{{ command_spacing }}"
+          - if: "{{ stream_volume | int(-1) >= 0 }}"
+            then:
+              - service: media_player.volume_set
+                target:
+                  entity_id: "{{ playback_device }}"
+                data:
+                  volume_level: "{{ stream_volume | float / 100 }}"
+
+      # ── Streaming ended ──────────────────────────────────────────────────
+      - conditions: "{{ trigger.id == 'stream_end' }}"
+        sequence:
+          - delay: !input power_off_delay
+          # Re-verify the streamer is still stopped after the delay.
+          - condition: template
+            value_template: >-
+              {{ states(streaming_device) in ['idle', 'off', 'standby'] }}
+          # Guard: if a Stream Input is configured, only run the end cleanup
+          # (return input/volume + power off) while the playback device is still
+          # on that input. If it's been switched to another input, it's in use
+          # elsewhere — leave it completely alone. Skipped when Stream Input is
+          # blank (no reference to compare against).
+          - condition: template
+            value_template: >-
+              {{ stream_input | length == 0
+                 or state_attr(playback_device, 'source') == stream_input }}
+          - if: "{{ idle_input | length > 0 }}"
+            then:
+              - service: media_player.select_source
+                target:
+                  entity_id: "{{ playback_device }}"
+                data:
+                  source: "{{ idle_input }}"
+              - delay: "{{ command_spacing }}"
+          - if: "{{ restore_volume_on_end and stream_volume | int(-1) >= 0 }}"
+            then:
+              - service: media_player.volume_set
+                target:
+                  entity_id: "{{ playback_device }}"
+                data:
+                  volume_level: "{{ stream_volume | float / 100 }}"
+              - delay: "{{ command_spacing }}"
+          - if: "{{ power_off_control }}"
+            then:
+              - service: media_player.turn_off
+                target:
+                  entity_id: "{{ playback_device }}"
+
+      # ── Streaming paused (guarded auto-off) ──────────────────────────────
+      - conditions: "{{ trigger.id == 'stream_pause' and power_off_control }}"
+        sequence:
+          # Capture the playback input at the moment of pause.
+          - variables:
+              source_at_pause: "{{ state_attr(playback_device, 'source') }}"
+          - delay: !input pause_autooff_delay
+          # Only auto-off if still paused, still on, and the input is unchanged.
+          - condition: template
+            value_template: >-
+              {{ is_state(streaming_device, 'paused')
+                 and states(playback_device) not in ['off', 'unavailable', 'unknown']
+                 and state_attr(playback_device, 'source') == source_at_pause }}
+          - if: "{{ idle_input | length > 0 }}"
+            then:
+              - service: media_player.select_source
+                target:
+                  entity_id: "{{ playback_device }}"
+                data:
+                  source: "{{ idle_input }}"
+              - delay: "{{ command_spacing }}"
+          - if: "{{ restore_volume_on_end and stream_volume | int(-1) >= 0 }}"
+            then:
+              - service: media_player.volume_set
+                target:
+                  entity_id: "{{ playback_device }}"
+                data:
+                  volume_level: "{{ stream_volume | float / 100 }}"
+              - delay: "{{ command_spacing }}"
+          - service: media_player.turn_off
+            target:
+              entity_id: "{{ playback_device }}"
